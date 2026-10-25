@@ -53,6 +53,7 @@ import javacard.framework.ISOException;
 import javacard.framework.JCSystem;
 import javacard.framework.OwnerPIN;
 import javacard.framework.SystemException;
+import javacard.framework.TransactionException;
 import javacard.framework.CardRuntimeException;
 import javacard.framework.Util;
 import javacard.security.AESKey;
@@ -66,6 +67,11 @@ import javacard.security.Signature;
 import javacard.security.MessageDigest;
 import javacard.security.RandomData;
 import javacardx.crypto.Cipher;
+import org.suut.javacard.pki.curve25519.Curve25519KeyBuilder;
+import org.suut.javacard.pki.curve25519.Curve25519PrivateKey;
+import org.suut.javacard.pki.curve25519.Curve25519PublicKey;
+import org.suut.javacard.pki.curve25519.Curve25519Signature;
+import org.suut.javacard.pki.curve25519.Curve25519KeyAgreement;
 
 /**
  * Implements MUSCLE's Card Edge Specification.
@@ -169,6 +175,10 @@ public class Satochip extends javacard.framework.Applet {
     private final static byte INS_BIP32_SET_AUTHENTIKEY_PUBKEY= (byte)0x75; // deprecated
     private final static byte INS_BIP32_GET_EXTENDED_KEY= (byte) 0x6D;
     private final static byte INS_BIP32_SET_EXTENDED_PUBKEY= (byte) 0x74; // deprecated
+    // SLIP-0010 & Ed25519 for 25519 chains
+    private final static byte INS_SLIP10_GET_EXTENDED_KEY= (byte) 0x6B;
+    private final static byte INS_SIGN_ED25519_MESSAGE= (byte) 0x70;
+    private final static byte INS_X25519_KEY_AGREEMENT= (byte) 0x68;
 
     // signatures
     private final static byte INS_SIGN_MESSAGE= (byte) 0x6E;
@@ -313,6 +323,11 @@ public class Satochip extends javacard.framework.Applet {
     private final static short SW_BIP327_COUNTER_OVERFLOW= (short) 0x9C46;
     private final static short SW_BIP327_INVALID_ID= (short) 0x9C47;
 
+    /** Ed25519 & SLIP-0010 errors **/
+    private final static short SW_SLIP10_NON_HARDENED     = (short) 0x9C4D;
+    private final static short SW_ED25519_UNINITIALIZED    = (short) 0x9C4E;
+    private final static short SW_X25519_FAILURE           = (short) 0x9C4F;
+
     /****************************************
      *            Other constants           *
      ****************************************/
@@ -397,6 +412,21 @@ public class Satochip extends javacard.framework.Applet {
     private AESKey bip32_masterchaincode;
     // last derived extended key, in RAM cleared on deselect if the card supports it (see buildTransientECKey())
     private ECPrivateKey bip32_extendedkey;
+
+    // SLIP-0010 & Ed25519 for 25519 chains
+    public final static byte[] ED25519_SEED = {
+        (byte)'e', (byte)'d', (byte)'2', (byte)'5', (byte)'5', (byte)'1', (byte)'9',
+        (byte)' ', (byte)'s', (byte)'e', (byte)'e', (byte)'d'
+    };
+    private boolean ed25519_seeded = false;
+    private AESKey ed25519_masterkey;
+    private AESKey ed25519_masterchaincode;
+    private Curve25519PrivateKey ed25519_extendedkey;
+    private Curve25519PublicKey ed25519_extendedpubkey;
+    private Curve25519Signature ed25519_signer;
+    private Curve25519PrivateKey x25519_privatekey;
+    private Curve25519PublicKey x25519_publickey;
+    private Curve25519KeyAgreement x25519_keyagreement;
     
     /*********************************************
      *             Schnorr signatures            *
@@ -484,6 +514,15 @@ public class Satochip extends javacard.framework.Applet {
     private static final byte OFFSET_2FA_ID=OFFSET_2FA_HMACKEY+20;
     private static final byte OFFSET_2FA_SIZE=OFFSET_2FA_ID+20;
     private static final short HMAC_CHALRESP_2FA=(short)0x8000;
+    private static final byte HMAC_PAD_ED25519_MESSAGE=(byte)0xCE;
+    private static final byte HMAC_PAD_X25519=(byte)0xCF;
+    private static final byte[] ED25519_PUBLIC_PROOF_TAG = {
+        'S','a','t','o','c','h','i','p',' ','E','d','2','5','5','1','9',' ','p','u','b','l','i','c',' ','k','e','y',' ','v','1'
+    };
+    private static final byte[] X25519_BASEPOINT = {
+        0x09, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    };
     /**
      * 2FA codes: each 2FA-protected operation requires an HMAC-SHA1 (computed with the
      * 20-byte 2FA secret) over a 64-byte message made of a 32-byte operation-specific
@@ -495,6 +534,7 @@ public class Satochip extends javacard.framework.Applet {
      * - Seed reset (resetBIP32Seed):        [ 32b authentikey-coordx  | 32-byte 0xFF-padding ] 
      * - 2FA reset (reset2FAKey):            [ 20b 2FA_ID  | 44-byte 0xAA-padding ]  
      * - Hash signing (SignTransactionHash): [ 32b Hash | 32-byte 0xCC-padding ]
+     * - Ed25519 message signing: [ SHA-256(full message) | 32-byte 0xCE-padding ]
      * - Schnorr hash (SignSchnorrHash):     [ 32b Hash | 32-byte 0xDD-padding ]
      * - MuSig2 sign (Musig2SignHash):       [ 32b sha256(b | e*a | has_even_y(R) | g*gacc) | 32-byte 0xEE-padding ]
      *   (the hash covers the 66 bytes of signing data, as sent in the APDU; see Musig2SignHash)
@@ -542,11 +582,13 @@ public class Satochip extends javacard.framework.Applet {
     private static final byte FEATURE_ID_LIQUID=2;
     private static final byte FEATURE_ID_MUSIG2=3;
     private static final byte FEATURE_ID_RANDOM=4;
+    private static final byte FEATURE_ID_ED25519=5;
     private byte feature_schnorr_policy = FEATURE_ENABLED; // schnorr signature
     private byte feature_nostr_policy = FEATURE_ENABLED; // nostr event signing
     private byte feature_liquid_policy = FEATURE_ENABLED; // Liquid-Bitcoin
     private byte feature_musig2_policy = FEATURE_ENABLED; // musig2 signature
     private byte feature_random_policy = FEATURE_ENABLED; // random bytes export
+    private byte feature_ed25519_policy = FEATURE_ENABLED; // Ed25519 / SLIP-0010 support
     
     // maximum number of random bytes that can be exported per GET_RANDOM call
     private final static byte RANDOM_MAX_SIZE = (byte) 64;
@@ -632,6 +674,19 @@ public class Satochip extends javacard.framework.Applet {
         bip32_extendedkey= buildTransientECKey();
         //Secp256k1.setCommonCurveParameters(bip32_extendedkey); => done in setup() as it must be performed after each reset_to_factory!
 
+        // SLIP-0010 & Ed25519 material for 25519 chains
+        ed25519_masterkey= (AESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_AES, KeyBuilder.LENGTH_AES_256, false);
+        ed25519_masterchaincode= (AESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_AES, KeyBuilder.LENGTH_AES_256, false);
+        ed25519_extendedkey = buildTransientCurve25519Key(Curve25519KeyBuilder.ALG_TYPE_EDDSA_PRIVATE);
+        ed25519_extendedpubkey = buildTransientCurve25519PublicKey(Curve25519KeyBuilder.ALG_TYPE_EDDSA_PUBLIC);
+        ed25519_signer = new Curve25519Signature();
+        // X25519 working keys must never fall back to persistent memory: they are temporary
+        // command material and a persistent fallback would both wear EEPROM and risk lifetime
+        // mistakes after clearKey().
+        x25519_privatekey = buildEphemeralCurve25519PrivateKey(Curve25519KeyBuilder.ALG_TYPE_X25519_PRIVATE);
+        x25519_publickey = buildEphemeralCurve25519PublicKey(Curve25519KeyBuilder.ALG_TYPE_X25519_PUBLIC);
+        x25519_keyagreement = new Curve25519KeyAgreement();
+
         // Liquid-Bitcoin Master Binding Key from slip77
         liquid_master_blinding_key = new byte[(short)32];
 
@@ -716,6 +771,80 @@ public class Satochip extends javacard.framework.Applet {
             } catch (CardRuntimeException e1) {
                 // Last option as it will wear out the flash eventually
                 return (AESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_AES, KeyBuilder.LENGTH_AES_128, false);
+            }
+        }
+    }
+
+    /**
+     * Builds the staged Ed25519 private key with the strongest available lifetime. Some cards
+     * expose CLEAR_ON_RESET but not CLEAR_ON_DESELECT memory; using the latter unconditionally
+     * would make the applet fail during installation on those cards.
+     */
+    private static Curve25519PrivateKey buildTransientCurve25519Key(byte algorithm) {
+        try {
+            return (Curve25519PrivateKey) Curve25519KeyBuilder.buildKey(
+                    algorithm,
+                    JCSystem.MEMORY_TYPE_TRANSIENT_DESELECT);
+        } catch (CryptoException e) {
+            try {
+                return (Curve25519PrivateKey) Curve25519KeyBuilder.buildKey(
+                        algorithm,
+                        JCSystem.MEMORY_TYPE_TRANSIENT_RESET);
+            } catch (CryptoException e1) {
+                return (Curve25519PrivateKey) Curve25519KeyBuilder.buildKey(
+                        algorithm,
+                        JCSystem.MEMORY_TYPE_PERSISTENT);
+            }
+        }
+    }
+
+    /** Builds an X25519 private working key without a persistent-memory fallback. */
+    private static Curve25519PrivateKey buildEphemeralCurve25519PrivateKey(byte algorithm) {
+        try {
+            return (Curve25519PrivateKey) Curve25519KeyBuilder.buildKey(
+                    algorithm, JCSystem.MEMORY_TYPE_TRANSIENT_DESELECT);
+        } catch (CryptoException e) {
+            try {
+                return (Curve25519PrivateKey) Curve25519KeyBuilder.buildKey(
+                        algorithm, JCSystem.MEMORY_TYPE_TRANSIENT_RESET);
+            } catch (CryptoException e1) {
+                CryptoException.throwIt(CryptoException.NO_SUCH_ALGORITHM);
+                return null;
+            }
+        }
+    }
+
+    /** Builds an X25519 public working key without a persistent-memory fallback. */
+    private static Curve25519PublicKey buildEphemeralCurve25519PublicKey(byte algorithm) {
+        try {
+            return (Curve25519PublicKey) Curve25519KeyBuilder.buildKey(
+                    algorithm, JCSystem.MEMORY_TYPE_TRANSIENT_DESELECT);
+        } catch (CryptoException e) {
+            try {
+                return (Curve25519PublicKey) Curve25519KeyBuilder.buildKey(
+                        algorithm, JCSystem.MEMORY_TYPE_TRANSIENT_RESET);
+            } catch (CryptoException e1) {
+                CryptoException.throwIt(CryptoException.NO_SUCH_ALGORITHM);
+                return null;
+            }
+        }
+    }
+
+    /** Builds the optional supplied Ed25519 public key without using EEPROM on normal cards. */
+    private static Curve25519PublicKey buildTransientCurve25519PublicKey(byte algorithm) {
+        try {
+            return (Curve25519PublicKey) Curve25519KeyBuilder.buildKey(
+                    algorithm,
+                    JCSystem.MEMORY_TYPE_TRANSIENT_DESELECT);
+        } catch (CryptoException e) {
+            try {
+                return (Curve25519PublicKey) Curve25519KeyBuilder.buildKey(
+                        algorithm,
+                        JCSystem.MEMORY_TYPE_TRANSIENT_RESET);
+            } catch (CryptoException e1) {
+                return (Curve25519PublicKey) Curve25519KeyBuilder.buildKey(
+                        algorithm,
+                        JCSystem.MEMORY_TYPE_PERSISTENT);
             }
         }
     }
@@ -902,6 +1031,9 @@ public class Satochip extends javacard.framework.Applet {
         case INS_BIP32_GET_EXTENDED_KEY:
             sizeout= getBIP32ExtendedKey(apdu, buffer);
             break;
+        case INS_SLIP10_GET_EXTENDED_KEY:
+            sizeout= getSLIP10ExtendedKey(apdu, buffer);
+            break;
         case INS_BIP32_SET_EXTENDED_PUBKEY:
             ISOException.throwIt(SW_INS_DEPRECATED);
             break;
@@ -909,6 +1041,12 @@ public class Satochip extends javacard.framework.Applet {
             sizeout= getBIP32LiquidMasterBlindingKey(apdu, buffer);
             break;
         // Signatures
+        case INS_SIGN_ED25519_MESSAGE:
+            sizeout= signEd25519Message(apdu, buffer);
+            break;
+        case INS_X25519_KEY_AGREEMENT:
+            sizeout= x25519KeyAgreement(apdu, buffer);
+            break;
         case INS_SIGN_MESSAGE:
             // deprecated: use SignTransactionHash (0x7A) with the message hash instead
             ISOException.throwIt(SW_INS_DEPRECATED);
@@ -1154,6 +1292,7 @@ public class Satochip extends javacard.framework.Applet {
         feature_liquid_policy = FEATURE_ENABLED;
         feature_musig2_policy = FEATURE_ENABLED;
         feature_random_policy = FEATURE_ENABLED;
+        feature_ed25519_policy = FEATURE_ENABLED;
 
         // reset card label
         card_label_size=0;
@@ -1456,6 +1595,19 @@ public class Satochip extends javacard.framework.Applet {
 
         // reset Liquid-Bitcoin Master Blinding Key (as it is derived from the seed)
         Util.arrayFillNonAtomic(liquid_master_blinding_key, (short)0, (short)32, (byte)0x00);
+
+        // reset Ed25519 & SLIP-0010 state
+        ed25519_seeded = false;
+        ed25519_masterkey.clearKey();
+        ed25519_masterchaincode.clearKey();
+        if (ed25519_extendedkey != null)
+            ed25519_extendedkey.clearKey();
+        if (ed25519_extendedpubkey != null)
+            ed25519_extendedpubkey.clearKey();
+        if (x25519_privatekey != null)
+            x25519_privatekey.clearKey();
+        if (x25519_publickey != null)
+            x25519_publickey.clearKey();
 
         // reset trusted pubkey (for secure import from SeedKeeper)
         if (is_trusted_pubkey) {
@@ -1825,6 +1977,17 @@ public class Satochip extends javacard.framework.Applet {
     private short LogOutAll() {
         if (pin != null)
             pin.reset();
+
+        // The staged Ed25519 key is session state, regardless of whether the card provided
+        // transient deselect memory or the fallback persistent implementation.
+        if (ed25519_extendedkey != null)
+            ed25519_extendedkey.clearKey();
+        if (ed25519_extendedpubkey != null)
+            ed25519_extendedpubkey.clearKey();
+        if (x25519_privatekey != null)
+            x25519_privatekey.clearKey();
+        if (x25519_publickey != null)
+            x25519_publickey.clearKey();
         
         return (short)0;
     }
@@ -1875,12 +2038,13 @@ public class Satochip extends javacard.framework.Applet {
         buffer[pos++] = (byte)0x01; // always enabled
         // NFC policy (offset 12)
         buffer[pos++] = nfc_policy;
-        // Optional features policy (offset 13-17)
+        // Optional features policy (offset 13-18)
         buffer[pos++] = feature_schnorr_policy;
         buffer[pos++] = feature_nostr_policy;
         buffer[pos++] = feature_liquid_policy;
         buffer[pos++] = feature_musig2_policy;
         buffer[pos++] = feature_random_policy;
+        buffer[pos++] = feature_ed25519_policy;
 
         return pos;
     }
@@ -2088,6 +2252,11 @@ public class Satochip extends javacard.framework.Applet {
                     ISOException.throwIt(SW_FEATURE_BLOCKED);
                 feature_random_policy = feature_policy;
                 break;
+            case FEATURE_ID_ED25519:
+                if (feature_ed25519_policy == FEATURE_BLOCKED)
+                    ISOException.throwIt(SW_FEATURE_BLOCKED);
+                feature_ed25519_policy = feature_policy;
+                break;
             default:
                 ISOException.throwIt(SW_INCORRECT_P1);
         }// end switch
@@ -2169,6 +2338,12 @@ public class Satochip extends javacard.framework.Applet {
         HmacSha512.computeHmacSha512(SLIP21_DOMAIN, (short)0, (short)SLIP21_DOMAIN.length, buffer, offset, (short)bip32_seedsize, recvBuffer, (short)0);
         HmacSha512.computeHmacSha512(recvBuffer, (short)0, (short)32, SLIP77_LABEL, (short)0, (short)SLIP77_LABEL.length, recvBuffer, (short)0);
         Util.arrayCopyNonAtomic(recvBuffer, (short)32, liquid_master_blinding_key, (short)0, (short)32);
+
+        // derive Ed25519 Master Key using SLIP-0010
+        HmacSha512.computeHmacSha512(ED25519_SEED, (short)0, (short)ED25519_SEED.length, buffer, offset, (short)bip32_seedsize, recvBuffer, (short)0);
+        ed25519_masterkey.setKey(recvBuffer, (short)0);
+        ed25519_masterchaincode.setKey(recvBuffer, (short)32);
+        ed25519_seeded= true;
 
         // bip32 is now seeded
         bip32_seeded= true;
@@ -2384,6 +2559,339 @@ public class Satochip extends javacard.framework.Applet {
         return appendAuthentikeySignature(buffer, (short)(BIP32_KEY_SIZE+BIP32_KEY_SIZE+sign_size+4));
 
     }// end of getBip32ExtendedKey()
+
+    /**
+     * The function computes the SLIP-0010 extended key for Ed25519 derived from the master seed.
+     * In SLIP-0010 for Ed25519:
+     * - Only hardened derivation is supported (index >= 0x80000000). Non-hardened indices are rejected.
+     * - Child private key is the 32-byte left half (IL) of HMAC-SHA512.
+     * - Child chain code is the 32-byte right half (IR) of HMAC-SHA512.
+     *
+     * ins: 0x6B
+     * p1: depth of the extended key (master is depth 0). Max depth is 10.
+     * p2: flags:
+     *      0x01: Ed25519 public key provided by client at (CDATA + 4*depth, 32 bytes).
+     *      0x02: return the derived key's X25519 Montgomery public key (32 bytes).
+     * data: [path_bytes(4*depth)] or [path_bytes(4*depth) | Ed25519 pubkey(32b)]
+     *
+     * returns: [chaincode(32b) | pubkey_size(2b) | pubkey(0b or 32b) | sig_size(2b) | authentikey-sig]
+     * For P2=0x02 the returned public key is X25519 u-coordinate, not an Ed25519 encoding.
+     */
+    private short getSLIP10ExtendedKey(APDU apdu, byte[] buffer){
+        // check that PIN has been entered previously
+        if (!pin.isValidated())
+            ISOException.throwIt(SW_UNAUTHORIZED);
+
+        // check whether the seed is initialized
+        if (!ed25519_seeded)
+            ISOException.throwIt(SW_BIP32_UNINITIALIZED_SEED);
+
+        // check feature policy
+        if (feature_ed25519_policy != FEATURE_ENABLED)
+            ISOException.throwIt(SW_FEATURE_DISABLED);
+
+        byte depth = buffer[ISO7816.OFFSET_P1];
+        if ((depth < 0) || (depth > BIP32_MAX_DEPTH))
+            ISOException.throwIt(SW_INCORRECT_P1);
+
+        byte p2 = buffer[ISO7816.OFFSET_P2];
+        if (p2 != (byte)0x00 && p2 != (byte)0x01 && p2 != (byte)0x02)
+            ISOException.throwIt(SW_INCORRECT_P2);
+        boolean has_pubkey = (p2 == (byte)0x01);
+        boolean return_x25519_pubkey = (p2 == (byte)0x02);
+
+        short bytesLeft = Util.makeShort((byte) 0x00, buffer[ISO7816.OFFSET_LC]);
+        short requiredLen = (short)(4 * depth + (has_pubkey ? 32 : 0));
+        if (bytesLeft != requiredLen)
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+
+        // A failed derivation must never leave the previous path available for signing.
+        ed25519_extendedkey.clearKey();
+        ed25519_extendedpubkey.clearKey();
+        Util.arrayFillNonAtomic(recvBuffer, (short)0, (short)128, (byte)0);
+        boolean keep_staged_key = false;
+
+        try {
+            // parent data setup:
+            // recvBuffer layout:
+            // [ parent_chain_code (32b) | 0x00 | parent_key (32b) | index (4b) | child_key(32b) | child_chaincode(32b) ]
+            ed25519_masterchaincode.getKey(recvBuffer, BIP32_OFFSET_PARENT_CHAINCODE);
+            ed25519_masterkey.getKey(recvBuffer, BIP32_OFFSET_PARENT_KEY);
+            recvBuffer[BIP32_OFFSET_PARENT_SEPARATOR] = 0x00;
+
+            // iterate on path indices
+            short path_offset;
+            for (byte i = 0; i < depth; i++) {
+                path_offset = (short)(ISO7816.OFFSET_CDATA + 4 * i);
+
+                // SLIP-0010: Ed25519 ONLY supports hardened keys (msb must be set)!
+                byte msb = buffer[path_offset];
+                if ((msb & (byte)0x80) != (byte)0x80) {
+                    ISOException.throwIt(SW_SLIP10_NON_HARDENED);
+                }
+
+                recvBuffer[BIP32_OFFSET_PARENT_SEPARATOR] = 0x00;
+                Util.arrayCopyNonAtomic(buffer, path_offset, recvBuffer, BIP32_OFFSET_INDEX, (short)4);
+
+                // HMAC-SHA512(Key = parent_chaincode (32b), Data = 0x00 || parent_key (32b) || index (4b))
+                // Total data length is 1 + 32 + 4 = 37 bytes
+                HmacSha512.computeHmacSha512(
+                    recvBuffer, BIP32_OFFSET_PARENT_CHAINCODE, BIP32_KEY_SIZE,
+                    recvBuffer, BIP32_OFFSET_PARENT_SEPARATOR, (short)(1 + BIP32_KEY_SIZE + 4),
+                    recvBuffer, BIP32_OFFSET_CHILD_KEY
+                );
+
+                // In SLIP-0010 for Ed25519:
+                // Child key = IL (32 bytes at BIP32_OFFSET_CHILD_KEY)
+                // Child chaincode = IR (32 bytes at BIP32_OFFSET_CHILD_CHAINCODE)
+                Util.arrayCopyNonAtomic(recvBuffer, BIP32_OFFSET_CHILD_CHAINCODE, recvBuffer, BIP32_OFFSET_PARENT_CHAINCODE, BIP32_KEY_SIZE);
+                Util.arrayCopyNonAtomic(recvBuffer, BIP32_OFFSET_CHILD_KEY, recvBuffer, BIP32_OFFSET_PARENT_KEY, BIP32_KEY_SIZE);
+                recvBuffer[BIP32_OFFSET_PARENT_SEPARATOR] = 0x00;
+            }
+
+            // Stage into ed25519_extendedkey
+            ed25519_extendedkey.setS(recvBuffer, BIP32_OFFSET_PARENT_KEY, BIP32_KEY_SIZE);
+
+            if (has_pubkey) {
+                short pubkey_in_offset = (short)(ISO7816.OFFSET_CDATA + 4 * depth);
+                ed25519_extendedpubkey.setW(buffer, pubkey_in_offset, (short)32);
+            } else {
+                // no pubkey provided
+                ed25519_extendedpubkey.clearKey();
+            }
+
+            // Copy chaincode to buffer[0..32]
+            Util.arrayCopyNonAtomic(recvBuffer, BIP32_OFFSET_PARENT_CHAINCODE, buffer, (short)0, BIP32_KEY_SIZE);
+
+            short out_offset = BIP32_KEY_SIZE; // 32
+            if (has_pubkey) {
+                // write supplied Ed25519 public key (also used for pairwise verification)
+                Util.setShort(buffer, out_offset, (short)32);
+                out_offset += 2;
+                ed25519_extendedpubkey.getW(buffer, out_offset);
+                out_offset += 32;
+            } else if (return_x25519_pubkey) {
+                // Ed25519 and X25519 use the same clamped SHA-512 scalar. The Montgomery u
+                // coordinate lets a host recover the Ed25519 y coordinate; a fixed proof
+                // signature then disambiguates the compressed point's x-sign bit.
+                Util.setShort(buffer, out_offset, (short)32);
+                out_offset += 2;
+                computeX25519(ed25519_extendedkey, X25519_BASEPOINT, (short)0, buffer, out_offset);
+                out_offset += 32;
+            } else {
+                Util.setShort(buffer, out_offset, (short)0);
+                out_offset += 2;
+            }
+
+            // Append authentikey signature over [chaincode | pubkey_len | pubkey]
+            short response_length = appendAuthentikeySignature(buffer, out_offset);
+            keep_staged_key = true;
+            return response_length;
+        } finally {
+            // Parent and child private material must not survive any error path.
+            Util.arrayFillNonAtomic(recvBuffer, (short)0, (short)128, (byte)0);
+            if (!keep_staged_key) {
+                ed25519_extendedkey.clearKey();
+                ed25519_extendedpubkey.clearKey();
+            }
+        }
+    }
+
+    /** RFC 7748 little-endian u-coordinate decoding for public input. */
+    private static void normalizeX25519Public(byte[] value, short offset) {
+        value[(short)(offset + 31)] &= (byte)0x7F;
+        boolean atLeastP = value[(short)(offset + 31)] == (byte)0x7F;
+        for (short i = 1; i < 31; i++)
+            atLeastP &= value[(short)(offset + i)] == (byte)0xFF;
+        if (atLeastP && (short)(value[offset] & 0xFF) >= (short)0xED) {
+            byte low = (byte)((value[offset] & 0xFF) - 0xED);
+            Util.arrayFillNonAtomic(value, offset, (short)32, (byte)0);
+            value[offset] = low;
+        }
+    }
+
+    /**
+     * Computes a standards-compatible X25519 result using the scalar corresponding to the
+     * staged Ed25519 seed: clamp(SHA-512(seed)[0..32]). All private/intermediate bytes are
+     * held in transient working buffers and cleared on every exit path.
+     */
+    private short computeX25519(Curve25519PrivateKey edKey, byte[] peer, short peerOffset,
+            byte[] output, short outputOffset) {
+        short secretLength = 0;
+        byte allZero = (byte)0;
+        try {
+            edKey.getS(recvBuffer, (short)0);
+            HmacSha512.computeSha512(recvBuffer, (short)0, (short)32, recvBuffer, (short)64);
+            recvBuffer[64] &= (byte)0xF8;
+            recvBuffer[95] &= (byte)0x3F;
+            recvBuffer[95] |= (byte)0x40;
+            // Curve25519-JavaCard exposes EdDSA private bytes in RFC 8032 order, but its
+            // X25519 wrapper passes the private value directly to the native big-endian API.
+            // Reverse only this transient X25519 copy; do not alter the Ed25519 seed/scalar.
+            for (short i = 0; i < (short)32; i++)
+                tmpBuffer[i] = recvBuffer[(short)(95 - i)];
+            x25519_privatekey.setS(tmpBuffer, (short)0, (short)32);
+            // RFC 7748 decodeUCoordinate: ignore bit 255 and reduce encodings p..p+18.
+            Util.arrayCopyNonAtomic(peer, peerOffset, recvBuffer, (short)96, (short)32);
+            normalizeX25519Public(recvBuffer, (short)96);
+            x25519_publickey.setW(recvBuffer, (short)96, (short)32);
+            secretLength = x25519_keyagreement.keyExchange(
+                    x25519_privatekey, x25519_publickey, recvBuffer, (short)128);
+            if (secretLength != (short)32)
+                ISOException.throwIt(SW_X25519_FAILURE);
+            for (short i = 0; i < (short)32; i++)
+                allZero |= recvBuffer[(short)(128 + i)];
+            if (allZero == (byte)0)
+                ISOException.throwIt(SW_X25519_FAILURE);
+            Util.arrayCopyNonAtomic(recvBuffer, (short)128, output, outputOffset, (short)32);
+            return (short)32;
+        } catch (CryptoException e) {
+            ISOException.throwIt(SW_X25519_FAILURE);
+            return (short)0;
+        } catch (CardRuntimeException e) {
+            ISOException.throwIt(SW_X25519_FAILURE);
+            return (short)0;
+        } finally {
+            x25519_privatekey.clearKey();
+            x25519_publickey.clearKey();
+            Util.arrayFillNonAtomic(recvBuffer, (short)0, (short)160, (byte)0);
+            Util.arrayFillNonAtomic(tmpBuffer, (short)0, (short)32, (byte)0);
+        }
+    }
+
+    /** X25519 shared-secret command (INS 0x68), gated by PIN, feature policy and optional 2FA. */
+    private short x25519KeyAgreement(APDU apdu, byte[] buffer) {
+        if (!pin.isValidated())
+            ISOException.throwIt(SW_UNAUTHORIZED);
+        if (feature_ed25519_policy != FEATURE_ENABLED)
+            ISOException.throwIt(SW_FEATURE_DISABLED);
+        if (buffer[ISO7816.OFFSET_P1] != (byte)0xFF || buffer[ISO7816.OFFSET_P2] != (byte)0x00)
+            ISOException.throwIt(ISO7816.SW_WRONG_P1P2);
+        if (!ed25519_seeded)
+            ISOException.throwIt(SW_BIP32_UNINITIALIZED_SEED);
+        if (!ed25519_extendedkey.isInitialized())
+            ISOException.throwIt(SW_ED25519_UNINITIALIZED);
+
+        short bytesLeft = Util.makeShort((byte)0x00, buffer[ISO7816.OFFSET_LC]);
+        short expectedLength = needs_2FA ? (short)54 : (short)32;
+        if (bytesLeft != expectedLength)
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+
+        short peerOffset = ISO7816.OFFSET_CDATA;
+        if (needs_2FA) {
+            short flagsOffset = (short)(peerOffset + 32);
+            if (Util.getShort(buffer, flagsOffset) != HMAC_CHALRESP_2FA)
+                ISOException.throwIt(SW_INCORRECT_ALG);
+            Util.arrayCopyNonAtomic(buffer, peerOffset, recvBuffer, (short)0, (short)32);
+            Util.arrayFillNonAtomic(recvBuffer, (short)32, (short)32, HMAC_PAD_X25519);
+            HmacSha160.computeHmacSha160(data2FA, OFFSET_2FA_HMACKEY, (short)20,
+                    recvBuffer, (short)0, (short)64, recvBuffer, (short)64);
+            boolean ok = arrayCompareConstantTime(buffer, (short)(flagsOffset + 2),
+                    recvBuffer, (short)64, (short)20);
+            Util.arrayFillNonAtomic(recvBuffer, (short)0, (short)84, (byte)0);
+            if (!ok)
+                ISOException.throwIt(SW_SIGNATURE_INVALID);
+        }
+
+        computeX25519(ed25519_extendedkey, buffer, peerOffset, buffer, (short)0);
+        return (short)32;
+    }
+
+    /**
+     * Signs a message/transaction using the staged Ed25519 extended key.
+     *
+     * ins: 0x70
+     * p1: key number (0xFF for the staged Ed25519 key)
+     * p2: 0x00
+     * data: [msg_bytes (len) | optional 2FA]
+     *
+     * returns: [sig(64b)]
+     */
+    private short signEd25519Message(APDU apdu, byte[] buffer){
+        // check that PIN has been entered previously
+        if (!pin.isValidated())
+            ISOException.throwIt(SW_UNAUTHORIZED);
+
+        // check feature policy
+        if (feature_ed25519_policy != FEATURE_ENABLED)
+            ISOException.throwIt(SW_FEATURE_DISABLED);
+
+        byte key_nb = buffer[ISO7816.OFFSET_P1];
+        if (key_nb != (byte)0xFF) {
+            ISOException.throwIt(ISO7816.SW_WRONG_P1P2);
+        }
+        if (buffer[ISO7816.OFFSET_P2] != (byte)0x00) {
+            ISOException.throwIt(ISO7816.SW_WRONG_P1P2);
+        }
+
+        if (!ed25519_seeded)
+            ISOException.throwIt(SW_BIP32_UNINITIALIZED_SEED);
+
+        if (!ed25519_extendedkey.isInitialized())
+            ISOException.throwIt(SW_ED25519_UNINITIALIZED);
+
+        short bytesLeft = Util.makeShort((byte) 0x00, buffer[ISO7816.OFFSET_LC]);
+        if (bytesLeft == 0)
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+
+        short msg_len = bytesLeft;
+        // check 2FA if required
+        if (needs_2FA) {
+            // The approval must bind the complete message, not just a prefix. The digest also
+            // keeps the 2FA format fixed while allowing messages shorter than 32 bytes.
+            if (bytesLeft < (short)(1 + 20 + 2))
+                ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+            msg_len = (short)(bytesLeft - 22);
+            short hmac_flags = Util.getShort(buffer, (short)(ISO7816.OFFSET_CDATA + msg_len));
+            if (hmac_flags != HMAC_CHALRESP_2FA)
+                ISOException.throwIt(SW_INCORRECT_ALG);
+            // 2FA check
+            sha256.doFinal(buffer, (short)ISO7816.OFFSET_CDATA, msg_len, recvBuffer, (short)0);
+            Util.arrayFillNonAtomic(recvBuffer, (short)32, (short)32, HMAC_PAD_ED25519_MESSAGE);
+            HmacSha160.computeHmacSha160(data2FA, OFFSET_2FA_HMACKEY, (short)20, recvBuffer, (short)0, (short)64, recvBuffer, (short)64);
+            boolean hmac_ok = arrayCompareConstantTime(buffer, (short)(ISO7816.OFFSET_CDATA + msg_len + 2), recvBuffer, (short)64, (short)20);
+            Util.arrayFillNonAtomic(recvBuffer, (short)0, (short)84, (byte)0);
+            if (!hmac_ok)
+                ISOException.throwIt(SW_SIGNATURE_INVALID);
+        }
+
+        // Avoid active transaction
+        if (JCSystem.getTransactionDepth() != 0) {
+            TransactionException.throwIt(TransactionException.IN_PROGRESS);
+        }
+
+        try {
+            // Sign with Ed25519. Stage output into recvBuffer first to prevent overlapping buffer
+            // issues with the incoming APDU data.
+            short sig_len = ed25519_signer.sign(
+                ed25519_extendedkey,
+                buffer, ISO7816.OFFSET_CDATA, msg_len,
+                recvBuffer, (short)0
+            );
+
+            if (sig_len != (short)64) {
+                ISOException.throwIt(SW_SIGNATURE_INVALID);
+            }
+
+            // If public key is set, pairwise verify.
+            if (ed25519_extendedpubkey.isInitialized()) {
+                boolean verified = ed25519_signer.verify(
+                    ed25519_extendedpubkey,
+                    buffer, ISO7816.OFFSET_CDATA, msg_len,
+                    recvBuffer, (short)0, (short)64
+                );
+                if (!verified) {
+                    ISOException.throwIt(SW_SIGNATURE_INVALID);
+                }
+            }
+
+            // Copy signature to buffer before clearing the transient scratch area.
+            Util.arrayCopyNonAtomic(recvBuffer, (short)0, buffer, (short)0, (short)64);
+            return (short)64;
+        } finally {
+            Util.arrayFillNonAtomic(recvBuffer, (short)0, (short)84, (byte)0);
+        }
+    }
     
     /**
      * This function returns the Master Blinding Key used in Liquid-Bitcoin for confidential transactions

@@ -22,25 +22,20 @@ package org.satochip.applet;
 
 import javacard.framework.ISOException;
 import javacard.framework.Util;
-import javacard.security.CryptoException;
 import javacard.security.MessageDigest;
 
-// very limited Hmac-SHA512 implementation
+// Compatibility HMAC-SHA512 implementation used by the original applet. The J3R452 profile does
+// not expose a usable hardware HMAC engine, so this implementation intentionally has one path.
 public class HmacSha512 {
 
     public static final short BLOCKSIZE=128; // 128 bytes 
     public static final short HASHSIZE=64;
     private static byte[] data;
-    
-    private static MessageDigest sha512;  
+    private static MessageDigest sha512;
     
     public static void init(byte[] tmp){
-        data= tmp;
-        try {
-            sha512 = MessageDigest.getInstance(MessageDigest.ALG_SHA_512, false); 
-        } catch (CryptoException e) {
-            ISOException.throwIt(Satochip.SW_UNSUPPORTED_FEATURE); // unsupported feature => use a more recent card!
-        }
+        data = tmp;
+        sha512 = MessageDigest.getInstance(MessageDigest.ALG_SHA_512, false);
     }
     
     public static short computeHmacSha512(byte[] key, short key_offset, short key_length, 
@@ -50,33 +45,47 @@ public class HmacSha512 {
         if (key_length>BLOCKSIZE || key_length<0){
             ISOException.throwIt(Satochip.SW_HMAC_UNSUPPORTED_KEYSIZE); // don't accept keys bigger than block size 
         }
+
+        if (sha512 == null) {
+            ISOException.throwIt(Satochip.SW_UNSUPPORTED_FEATURE);
+        }
+
         if (message_length>HASHSIZE || message_length<0){
             ISOException.throwIt(Satochip.SW_HMAC_UNSUPPORTED_MSGSIZE); // don't accept message bigger than block size (should be sufficient for BIP32)
         }
-        
-        // compute inner hash
-        for (short i=0; i<key_length; i++){
-            data[i]= (byte) (key[(short)(key_offset+i)] ^ (0x36));
+
+        try {
+            // compute inner hash
+            for (short i=0; i<key_length; i++){
+                data[i]= (byte) (key[(short)(key_offset+i)] ^ (0x36));
+            }
+            Util.arrayFillNonAtomic(data, key_length, (short)(BLOCKSIZE-key_length), (byte)0x36);
+            Util.arrayCopyNonAtomic(message, message_offset, data, BLOCKSIZE, message_length);
+            sha512.reset();
+            sha512.doFinal(data, (short)0, (short)(BLOCKSIZE+message_length), data, BLOCKSIZE);
+
+            // compute outer hash
+            for (short i=0; i<key_length; i++){
+                data[i]= (byte) (key[(short)(key_offset+i)] ^ (0x5c));
+            }
+            Util.arrayFillNonAtomic(data, key_length, (short)(BLOCKSIZE-key_length), (byte)0x5c);
+            sha512.reset();
+            sha512.doFinal(data, (short)0, (short)(BLOCKSIZE+HASHSIZE), mac, mac_offset);
+            return HASHSIZE;
+        } finally {
+            // This buffer contains HMAC pads, message material and the intermediate digest.
+            Util.arrayFillNonAtomic(data, (short)0, (short)(BLOCKSIZE + HASHSIZE), (byte)0);
         }
-        Util.arrayFillNonAtomic(data, key_length, (short)(BLOCKSIZE-key_length), (byte)0x36);       
-        Util.arrayCopyNonAtomic(message, message_offset, data, BLOCKSIZE, message_length);
-        sha512.reset();
-        sha512.doFinal(data, (short)0, (short)(BLOCKSIZE+message_length), data, BLOCKSIZE); // copy hash result to data buffer!
-        
-        // compute outer hash
-        for (short i=0; i<key_length; i++){
-            data[i]= (byte) (key[(short)(key_offset+i)] ^ (0x5c));
+    }
+
+    /** Computes SHA-512 using the digest engine already allocated during applet installation. */
+    public static short computeSha512(byte[] message, short message_offset, short message_length,
+            byte[] digest, short digest_offset) {
+        if (sha512 == null) {
+            ISOException.throwIt(Satochip.SW_UNSUPPORTED_FEATURE);
         }
-        Util.arrayFillNonAtomic(data, key_length, (short)(BLOCKSIZE-key_length), (byte)0x5c);
-        // previous hash already copied to correct offset in data
         sha512.reset();
-        sha512.doFinal(data, (short)0, (short)(BLOCKSIZE+HASHSIZE), mac, mac_offset);
-        
-        // erase the scratch area: it holds key^opad, the inner hash and the end of the message
-        // (e.g. the parent private key for a hardened BIP32 child)
-        // (message_length <= HASHSIZE, checked above)
-        Util.arrayFillNonAtomic(data, (short)0, (short)(BLOCKSIZE + HASHSIZE), (byte)0);
-        return HASHSIZE;
-    }   
-    
+        return sha512.doFinal(message, message_offset, message_length, digest, digest_offset);
+    }
+
 }

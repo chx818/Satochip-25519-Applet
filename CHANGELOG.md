@@ -12,6 +12,8 @@ Satochip applet full versions follows this format: vX.Y-Z.W where:
 
 Security fixes and hardening patches following a security code review of the applet.
 
+* Remove hardware HMAC-SHA512 probing and runtime fallback. The J3R452 card profile used for this project does not provide a usable hardware HMAC engine; HMAC-SHA512 now uses the original software implementation only. This avoids advertising or relying on an unavailable accelerator. Physical side-channel resistance of software HMAC is not claimed.
+
 The protocol version stays 0.16 for all the changes below. Client developers should read the breaking changes first: each one is detailed in the section where it belongs.
 
 ### Breaking changes (summary)

@@ -61,9 +61,14 @@ public class InstallTask extends DefaultTask {
 
     TerminalFactory tf = TerminalManager.getTerminalFactory();
     CardTerminal cardTerminal = null;
+    Object requestedReaderProperty = getProject().findProperty("org.satochip.reader");
+    String requestedReader = requestedReaderProperty == null ? null : requestedReaderProperty.toString();
 
     try {
       for (CardTerminal t : tf.terminals().list()) {
+        if (requestedReader != null && !requestedReader.equals(t.getName())) {
+          continue;
+        }
         if (t.isCardPresent()) {
           cardTerminal = t;
           break;
@@ -74,7 +79,9 @@ public class InstallTask extends DefaultTask {
     }
 
     if (cardTerminal == null) {
-      throw new GradleException("No available PC/SC terminal");
+      throw new GradleException(requestedReader == null
+          ? "No available PC/SC terminal"
+          : "No card present in requested PC/SC terminal: " + requestedReader);
     }
 
     Card apduCard;

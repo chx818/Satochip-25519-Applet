@@ -8,6 +8,7 @@ import org.bouncycastle.jce.ECNamedCurveTable;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.jce.spec.ECNamedCurveParameterSpec;
 import org.bouncycastle.math.ec.ECPoint;
+import org.bouncycastle.math.ec.rfc7748.X25519;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.jupiter.api.*;
 import org.satochip.desktop.PCSCCardChannel;
@@ -25,6 +26,7 @@ import java.util.Arrays;
 import java.util.HashSet;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * APDU-level test suite for the Satochip applet.
@@ -80,6 +82,8 @@ public class SatochipTest {
   static final byte FEATURE_ENABLED = 0;
   static final byte FEATURE_DISABLED = 1;
   static final byte FEATURE_ID_RANDOM = 4;
+  static final byte FEATURE_ID_ED25519 = 5;
+  static final byte FEATURE_BLOCKED = 2;
 
   static final byte[] SATOCHIP_INSTANCE_AID = Hex.decode("5361746F4368697000");
   static final byte[] NDEF_INSTANCE_AID = Hex.decode("D2760000850101");
@@ -158,13 +162,19 @@ public class SatochipTest {
 
   private static void openCardChannel() throws Exception {
     TerminalFactory tf = TerminalFactory.getDefault();
+    String requestedReader = System.getProperty("org.satochip.reader");
     for (CardTerminal t : tf.terminals().list()) {
+      if (requestedReader != null && !requestedReader.equals(t.getName())) {
+        continue;
+      }
       if (t.isCardPresent()) {
         cardTerminal = t;
         break;
       }
     }
-    assertNotNull(cardTerminal, "No card found in any reader");
+    assertNotNull(cardTerminal, requestedReader == null
+        ? "No card found in any reader"
+        : "No card found in reader " + requestedReader);
     openPCSCChannel();
   }
 
@@ -284,13 +294,13 @@ public class SatochipTest {
   @DisplayName("GET STATUS reports the expected fields")
   void getStatusTest() {
     byte[] s = cmdSet.cardGetStatus().getData();
-    assertEquals(18, s.length, "GET_STATUS payload length");
+    assertEquals(19, s.length, "GET_STATUS payload length, including Ed25519 feature policy");
     assertEquals(0x00, s[0], "protocol major version");
     assertEquals(0x10, s[1], "protocol minor version (0.16)");
     assertEquals(5, s[4], "PIN tries remaining should be back at the maximum");
     assertEquals(0x01, s[10], "setup done");
     assertEquals(0x01, s[11], "secure channel is always enabled");
-    for (int i = 13; i <= 17; i++) {
+    for (int i = 13; i <= 18; i++) {
       assertEquals(FEATURE_ENABLED, s[i],
           "feature policy at offset " + i + " should be enabled in the baseline state");
     }
@@ -442,6 +452,11 @@ public class SatochipTest {
     assertEquals(0x01, cmdSet.cardGetStatus().getData()[10], "the card must still be set up");
 
     try {
+      assertEquals(FEATURE_ENABLED, cmdSet.cardGetStatus().getData()[18]);
+      assertEquals(SW_OK, cmdSet.sendRawSecure(INS_SET_FEATURE_POLICY, FEATURE_ID_ED25519,
+          FEATURE_BLOCKED, new byte[0]).getSw());
+      assertEquals(FEATURE_BLOCKED, cmdSet.cardGetStatus().getData()[18]);
+
       // a new secure channel starts unauthenticated: the reset does not need the PIN
       cmdSet.forgetSecureChannel();
       assertEquals(SW_OK,
@@ -451,6 +466,7 @@ public class SatochipTest {
       assertEquals(0x00, status[8], "2FA must be disabled");
       assertEquals(0x00, status[9], "the seed must be erased");
       assertEquals(0x00, status[10], "the card must be back to the not-set-up state");
+      assertEquals(FEATURE_ENABLED, status[18], "factory reset must restore the Ed25519 policy");
 
       // SETUP validates its input before changing anything (the reset closed the secure channel)
       cmdSet.forgetSecureChannel();
@@ -492,7 +508,7 @@ public class SatochipTest {
     } finally {
       // restore the baseline: set up again with the same PIN/PUK and tries, and re-import the seed
       byte[] status = cmdSet.cardGetStatus().getData();
-      if (status[10] == 0x01 && status[4] != 5) {
+      if (status[10] == 0x01 && (status[4] != 5 || status[18] == FEATURE_BLOCKED)) {
         // a failure left the card set up with the test try limits, or with its PIN blocked:
         // reset it first (no PIN needed)
         cmdSet.cardSelect().checkOK();
@@ -711,7 +727,7 @@ public class SatochipTest {
 
     // an unknown feature id is refused (it used to be silently accepted)
     assertEquals(SW_INCORRECT_P1,
-        cmdSet.sendRawSecure(INS_SET_FEATURE_POLICY, 5, FEATURE_DISABLED, new byte[0]).getSw());
+        cmdSet.sendRawSecure(INS_SET_FEATURE_POLICY, 6, FEATURE_DISABLED, new byte[0]).getSw());
   }
 
   @Test
@@ -1035,6 +1051,9 @@ public class SatochipTest {
   static final byte INS_RESET_KEY = (byte) 0x33;
   static final byte INS_SET_2FA_KEY = (byte) 0x79;
   static final byte INS_RESET_2FA_KEY = (byte) 0x78;
+  static final byte INS_SLIP10_GET_EXTENDED_KEY = (byte) 0x6B;
+  static final byte INS_SIGN_ED25519_MESSAGE = (byte) 0x70;
+  static final byte INS_X25519_KEY_AGREEMENT = (byte) 0x68;
   static final byte INS_MUSIG2_GENERATE_NONCE = (byte) 0x7E;
   static final byte INS_MUSIG2_SIGN_HASH = (byte) 0x7F;
   static final int OP_INIT = 0x01;
@@ -1042,6 +1061,9 @@ public class SatochipTest {
   static final int SW_WRONG_LENGTH = 0x6700;
   static final int SW_INCORRECT_ALG = 0x9C09;
   static final int SW_SIGNATURE_INVALID = 0x9C0B;
+  static final int SW_SLIP10_NON_HARDENED = 0x9C4D;
+  static final int SW_ED25519_UNINITIALIZED = 0x9C4E;
+  static final int SW_X25519_FAILURE = 0x9C4F;
   static final int SW_2FA_INITIALIZED_KEY = 0x9C18;
   static final int SW_ECKEYS_INITIALIZED_KEY = 0x9C1A;
   static final int SW_BIP327_WRONG_SECNONCE = 0x9C44;
@@ -1053,6 +1075,7 @@ public class SatochipTest {
       Hex.decode("1f2e3d4c5b6a79880123456789abcdef00112233445566778899aabbccddeeff");
   static final int TEST_SLOT = 15;
   static final byte[] HMAC_FLAG_2FA = {(byte) 0x80, 0x00};
+  static final int ED25519_2FA_PADDING = 0xCE;
 
   @Test
   @DisplayName("2FA gates hash signing, key import and key reset, and can be removed")
@@ -1080,6 +1103,46 @@ public class SatochipTest {
           concat(hash, HMAC_FLAG_2FA, hmac2FA(hash, 0xCC)));
       assertEquals(SW_OK, sig.getSw());
       assertTrue(verifyEcdsa(pub, hash, sig.getData()));
+
+      // JCardEngine has no Curve25519 provider; exercise this path only on-card.
+      if (TARGET == TARGET_CARD) {
+      // --- Ed25519 message authorization must bind every message byte, including the tail.
+      byte[] edPath = Hex.decode("8000002c800001f58000000080000000");
+      assertEquals(SW_OK, cmdSet.sendRawSecure(INS_SLIP10_GET_EXTENDED_KEY, 4, 0x00, edPath).getSw());
+      byte[] edMessage = new byte[64];
+      Arrays.fill(edMessage, (byte) 0x41);
+      byte[] changedTail = edMessage.clone();
+      changedTail[63] ^= 0x01;
+
+      // The former prefix-only approval (first 32 bytes) must no longer be accepted.
+      byte[] prefixApproval = hmac2FA(Arrays.copyOf(edMessage, 32), 0xCC);
+      assertEquals(SW_SIGNATURE_INVALID, cmdSet.sendRawSecure(INS_SIGN_ED25519_MESSAGE, 0xFF, 0x00,
+          concat(edMessage, HMAC_FLAG_2FA, prefixApproval)).getSw());
+
+      byte[] fullMessageApproval = hmac2FA(sha256(edMessage), ED25519_2FA_PADDING);
+      assertEquals(SW_SIGNATURE_INVALID, cmdSet.sendRawSecure(INS_SIGN_ED25519_MESSAGE, 0xFF, 0x00,
+          concat(changedTail, HMAC_FLAG_2FA, fullMessageApproval)).getSw(),
+          "changing any message byte must invalidate the approval");
+      APDUResponse edSignature = cmdSet.sendRawSecure(INS_SIGN_ED25519_MESSAGE, 0xFF, 0x00,
+          concat(edMessage, HMAC_FLAG_2FA, fullMessageApproval));
+      assertEquals(SW_OK, edSignature.getSw());
+      assertEquals(64, edSignature.getData().length);
+
+      byte[] shortMessage = new byte[]{0x41};
+      assertEquals(SW_OK, cmdSet.sendRawSecure(INS_SIGN_ED25519_MESSAGE, 0xFF, 0x00,
+          concat(shortMessage, HMAC_FLAG_2FA,
+              hmac2FA(sha256(shortMessage), ED25519_2FA_PADDING))).getSw(),
+          "short messages must use the same full-message digest binding");
+
+      assertEquals(SW_SLIP10_NON_HARDENED,
+          cmdSet.sendRawSecure(INS_SLIP10_GET_EXTENDED_KEY, 1, 0x00,
+              Hex.decode("00000001")).getSw());
+      assertEquals(SW_ED25519_UNINITIALIZED,
+          cmdSet.sendRawSecure(INS_SIGN_ED25519_MESSAGE, 0xFF, 0x00,
+              concat(shortMessage, HMAC_FLAG_2FA,
+                  hmac2FA(sha256(shortMessage), ED25519_2FA_PADDING))).getSw(),
+          "a failed derivation must clear the previously staged Ed25519 key");
+      }
 
       // --- ImportKey: hmac(x(P) | (0x10^slot)*32)
       ECNamedCurveParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
@@ -1176,6 +1239,82 @@ public class SatochipTest {
     cmdSet.cardBip32GetExtendedKeyRaw("m/44'/0'/0'/0/0");
     assertEquals(SW_OK, cmdSet.sendRawSecure(INS_SIGN_TRANSACTION_HASH, 0xFF, 0x00,
         concat(sha256("x".getBytes()), new byte[2])).getSw());
+  }
+
+  @Test
+  @DisplayName("X25519 agreement matches RFC 7748 arithmetic and rejects unsafe inputs")
+  void x25519AgreementTest() throws Exception {
+    assumeTrue(TARGET == TARGET_CARD,
+        "JCardEngine has no Curve25519 provider; run this test with the card target");
+    byte[] path = Hex.decode("8000002c800001f58000000080000000");
+    APDUResponse derived = cmdSet.sendRawSecure(INS_SLIP10_GET_EXTENDED_KEY, 4, 0x02, path);
+    assertEquals(SW_OK, derived.getSw());
+    assertTrue(derived.getData().length >= 66);
+    assertEquals(0x0020, ((derived.getData()[32] & 0xFF) << 8) | (derived.getData()[33] & 0xFF));
+    byte[] cardU = Arrays.copyOfRange(derived.getData(), 34, 66);
+
+    byte[] childSeed = slip10ChildSeed(Vectors.BIP32_SEED,
+        new int[]{0x8000002c, 0x800001f5, 0x80000000, 0x80000000});
+    byte[] scalar = sha512(childSeed);
+    scalar = Arrays.copyOf(scalar, 32);
+    X25519.clampPrivateKey(scalar);
+
+    byte[] base = new byte[32];
+    base[0] = 0x09;
+    byte[] expectedU = new byte[32];
+    assertTrue(X25519.calculateAgreement(scalar, 0, base, 0, expectedU, 0));
+    assertArrayEquals(expectedU, cardU, "P2=02 must return the RFC 7748 Montgomery u-coordinate");
+
+    byte[] remote = Hex.decode("8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a");
+    byte[] expectedSecret = new byte[32];
+    assertTrue(X25519.calculateAgreement(scalar, 0, remote, 0, expectedSecret, 0));
+    APDUResponse agreement = cmdSet.sendRawSecure(INS_X25519_KEY_AGREEMENT, 0xFF, 0x00, remote);
+    assertEquals(SW_OK, agreement.getSw());
+    assertArrayEquals(expectedSecret, agreement.getData());
+
+    byte[] topBitAlias = remote.clone();
+    topBitAlias[31] |= (byte) 0x80;
+    APDUResponse alias = cmdSet.sendRawSecure(INS_X25519_KEY_AGREEMENT, 0xFF, 0x00, topBitAlias);
+    assertEquals(SW_OK, alias.getSw());
+    assertArrayEquals(expectedSecret, alias.getData(), "RFC 7748 ignores the input u-coordinate top bit");
+
+    byte[] pPlusNine = new byte[32];
+    byte[] pPlusNineBigEndian = java.math.BigInteger.valueOf(2).pow(255)
+        .subtract(java.math.BigInteger.TEN).toByteArray();
+    for (int i = 0; i < pPlusNineBigEndian.length; i++) {
+      int src = pPlusNineBigEndian.length - 1 - i;
+      if (i < 32) pPlusNine[i] = pPlusNineBigEndian[src];
+    }
+    APDUResponse reduced = cmdSet.sendRawSecure(INS_X25519_KEY_AGREEMENT, 0xFF, 0x00, pPlusNine);
+    APDUResponse canonicalNine = cmdSet.sendRawSecure(INS_X25519_KEY_AGREEMENT, 0xFF, 0x00,
+        concat(new byte[]{0x09}, new byte[31]));
+    assertEquals(SW_OK, reduced.getSw());
+    assertEquals(SW_OK, canonicalNine.getSw());
+    assertArrayEquals(canonicalNine.getData(), reduced.getData(), "p+9 must reduce to 9");
+
+    APDUResponse lowOrder = cmdSet.sendRawSecure(INS_X25519_KEY_AGREEMENT, 0xFF, 0x00, new byte[32]);
+    assertEquals(SW_X25519_FAILURE, lowOrder.getSw(), "all-zero X25519 shared secrets must be rejected");
+
+    APDUResponse set2FA = cmdSet.sendRawSecure(INS_SET_2FA_KEY, 0x00, 0x00,
+        concat(KEY_2FA, new byte[8]));
+    assertEquals(SW_OK, set2FA.getSw());
+    boolean twoFactorSet = true;
+    try {
+      byte[] wrongDomain = concat(remote, HMAC_FLAG_2FA, hmac2FA(remote, 0xCC));
+      assertEquals(SW_SIGNATURE_INVALID,
+          cmdSet.sendRawSecure(INS_X25519_KEY_AGREEMENT, 0xFF, 0x00, wrongDomain).getSw(),
+          "an approval for another operation must not authorize X25519");
+
+      byte[] correctDomain = concat(remote, HMAC_FLAG_2FA, hmac2FA(remote, 0xCF));
+      APDUResponse approved = cmdSet.sendRawSecure(INS_X25519_KEY_AGREEMENT, 0xFF, 0x00, correctDomain);
+      assertEquals(SW_OK, approved.getSw());
+      assertArrayEquals(expectedSecret, approved.getData());
+    } finally {
+      if (twoFactorSet) {
+        resetSession();
+        reset2FA();
+      }
+    }
   }
 
   @Test
@@ -1568,6 +1707,41 @@ public class SatochipTest {
   static byte[] sha256(byte[] input) {
     try {
       return MessageDigest.getInstance("SHA-256").digest(input);
+    } catch (Exception e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  static byte[] sha512(byte[] input) {
+    try {
+      return MessageDigest.getInstance("SHA-512").digest(input);
+    } catch (Exception e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  /** Independent SLIP-0010 Ed25519 child-seed reference used by the X25519 card test. */
+  static byte[] slip10ChildSeed(byte[] seed, int[] path) {
+    try {
+      javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA512");
+      mac.init(new javax.crypto.spec.SecretKeySpec("ed25519 seed".getBytes(), "HmacSHA512"));
+      byte[] digest = mac.doFinal(seed);
+      byte[] key = Arrays.copyOf(digest, 32);
+      byte[] chain = Arrays.copyOfRange(digest, 32, 64);
+      for (int index : path) {
+        mac.init(new javax.crypto.spec.SecretKeySpec(chain, "HmacSHA512"));
+        byte[] data = new byte[37];
+        System.arraycopy(key, 0, data, 1, 32);
+        data[0] = 0;
+        data[33] = (byte)(index >>> 24);
+        data[34] = (byte)(index >>> 16);
+        data[35] = (byte)(index >>> 8);
+        data[36] = (byte)index;
+        digest = mac.doFinal(data);
+        key = Arrays.copyOf(digest, 32);
+        chain = Arrays.copyOfRange(digest, 32, 64);
+      }
+      return key;
     } catch (Exception e) {
       throw new IllegalStateException(e);
     }

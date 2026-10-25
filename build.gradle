@@ -48,6 +48,7 @@ repositories {
 // Test target: 'card' (default, like Keycard: builds the CAP, installs it, then tests the card)
 // or 'simulator' (JCardEngine, no hardware; what CI uses).
 def testTarget = project.properties['org.satochip.test.target'] ?: 'card'
+def testReader = project.properties['org.satochip.reader']
 
 // BouncyCastle jars are signed, and two of them exposing the same packages make the JVM throw
 // "signer information does not match". Satochip-Java 0.3.4 settled on bcprov-jdk18on and excludes
@@ -65,11 +66,13 @@ configurations {
 dependencies {
   javacardTool 'com.github.martinpaljak:ant-javacard:26.05.15'
 
-  // compileOnly, never implementation: these are API *stubs*. The simulator provides the real
-  // implementations, and if the stubs reach the test runtime classpath every API call throws.
-  compileOnly files(javacardApi)
+  // JavaCard API stubs stay compile-only; JCardEngine supplies that runtime. The Curve25519 JAR
+  // is a CAP export/API stub needed at test runtime for linkage, not crypto. Ed25519/X25519 must
+  // be tested on-card because JCardEngine has no Curve25519 provider.
+  compileOnly files(javacardApi, "$projectDir/lib/curve25519.jar")
 
   testImplementation 'pro.javacard:jcardengine:26.09.15-20260928.050453-6'
+  testRuntimeOnly files("$projectDir/lib/curve25519.jar")
   // brings satochip-lib, and bcprov-jdk18on with it (an `api` dependency of the library)
   testImplementation 'com.github.Toporin.Satochip-Java:satochip-desktop:0.3.4'
   testImplementation 'org.bitcoinj:bitcoinj-core:0.16.2'
@@ -99,6 +102,7 @@ tasks.register('convertJavacard') {
 
   inputs.dir('src/main/java').withPathSensitivity(PathSensitivity.RELATIVE)
   inputs.files(configurations.javacardTool)
+  inputs.file("$projectDir/lib/curve25519.jar")
   inputs.dir("$jckit/lib")
   inputs.property('targetSdk', targetSdk)
   inputs.property('packageAid', packageAid)
@@ -126,6 +130,7 @@ tasks.register('convertJavacard') {
     ant.javacard(jckit: kit) {
       cap(aid: pkgAid, version: pkgVer, targetsdk: target,
           output: out.absolutePath, sources: sourceDir) {
+        delegate."import"(jar: "$projectDir/lib/curve25519.jar")
         applet('class': 'org.satochip.applet.Satochip',   aid: satoAid)
         applet('class': 'org.satochip.applet.NDEFApplet', aid: tagAid)
       }
@@ -151,6 +156,7 @@ test {
   useJUnitPlatform { excludeTags 'manual', 'benchmark' }
   testLogging { events 'passed', 'skipped', 'failed'; showStandardStreams = false }
   systemProperty 'org.satochip.test.target', testTarget
+  if (testReader) systemProperty 'org.satochip.reader', testReader.toString()
 
   if (testTarget == 'card') {
     // Never let this task be considered up to date. The card holds state that Gradle cannot see,

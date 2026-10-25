@@ -1,17 +1,29 @@
 bin/
-dist/
 .idea/
-SatoChip-*.cap
-
-# IntelliJ IDEA project files
-.idea
 *.iml
 /.vscode
 
-# Gradle output
-/.gradle
-/build
-/bin
-buildSrc/build
-buildSrc/.gradle
+# Gradle output & local caches
+/.gradle/
+/.gradle-user-home/
+/build/
+/bin/
+buildSrc/build/
+buildSrc/.gradle/
 /gradle.properties
+
+# Python cache & temporary files
+__pycache__/
+tools/__pycache__/
+*.py[cod]
+*.log
+*.tmp
+*.bak
+
+/SatoChip-*.cap
+
+# Dist release tracking (track release artifacts, ignore temporary builds)
+dist/*
+!dist/SatoChip-J3R452-Curve25519.cap
+!dist/SHA256SUMS
+!dist/build-manifest.json
