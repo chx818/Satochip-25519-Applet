@@ -109,8 +109,10 @@ Ed25519（Twisted Edwards 曲线）与 X25519（Montgomery 曲线）在双有理
 
 为防止恶意中间人（MITM）或恶意上位机代理篡改派生出的链码或公钥，Applet 沿用了 Satochip 官方的 Authentikey 背书机制：
 * 每次调用 `0x6B`，卡片返回的数据格式为：
-  $$\text{Payload} = [\text{Chaincode}(32B) \parallel \text{PubkeyLen}(2B) \parallel \text{Pubkey}(0B/32B)]$$
-  $$\text{Response} = [\text{Payload} \parallel \text{SigLen}(2B) \parallel \text{Authentikey\_ECDSA\_Signature}]$$
+  ```text
+  Payload  = [ Chaincode (32B) | PubkeyLen (2B) | Pubkey (0B / 32B) ]
+  Response = [ Payload | SigLen (2B) | Authentikey ECDSA Signature ]
+  ```
 * **客户端必须使用卡片的 Authentikey（secp256k1 公钥）对该签名进行核验**。如果签名无效或被篡改，客户端必须立刻拒绝该派生结果。
 
 ---
@@ -121,11 +123,15 @@ Ed25519（Twisted Edwards 曲线）与 X25519（Montgomery 曲线）在双有理
 
 #### 强绑定算法（彻底根除截断篡改漏洞）
 * **Ed25519 签名 2FA 校验**：
-  $$\text{Digest} = \text{SHA256}(\text{full\_message})$$
-  $$\text{Token} = \text{HMAC-SHA1}(K_{2FA}, \text{Digest} \parallel 0xCE^{32})$$
+  ```text
+  Digest = SHA256(full_message)
+  Token  = HMAC-SHA1(K_2FA, Digest || 0xCE^32)
+  ```
   *无论消息为 1 字节还是 128 字节，均绑定全消息 SHA-256 摘要。篡改 32 字节之后的任意数据，印章必定失效。*
 * **X25519 协商 2FA 校验（域隔离）**：
-  $$\text{Token} = \text{HMAC-SHA1}(K_{2FA}, \text{remote\_u} \parallel 0xCF^{32})$$
+  ```text
+  Token = HMAC-SHA1(K_2FA, remote_u || 0xCF^32)
+  ```
   *使用独立填充常量 `0xCF`，防止不同类型的 2FA 授权相互重放。*
 
 ---
@@ -172,10 +178,12 @@ Ed25519（Twisted Edwards 曲线）与 X25519（Montgomery 曲线）在双有理
   * **`0x01`**：派生并验证附带的 32 字节 Ed25519 公钥，暂存用于后续成对校验。
   * **`0x02`**：派生并返回 32 字节 Montgomery $u$ 坐标（用于上位机反解公钥）。
 * **Data 格式 (Lc)**：
-  * 若 $P2 \in \{0x00, 0x02\}$：$[path(4 \times depth)]$
-  * 若 $P2 == 0x01$：$[path(4 \times depth) \parallel pubkey(32B)]$
+  * 若 `P2 == 0x00` 或 `P2 == 0x02`：`[ path (4 * depth) ]`
+  * 若 `P2 == 0x01`：`[ path (4 * depth) | pubkey (32B) ]`
 * **应答数据格式 (Response Data)**：
-  $$\text{Response} = [\text{chaincode}(32B) \parallel \text{pub\_len}(2B) \parallel \text{public\_val}(0B/32B) \parallel \text{sig\_len}(2B) \parallel \text{authentikey\_sig}]$$
+  ```text
+  Response = [ chaincode (32B) | pub_len (2B) | public_val (0B / 32B) | sig_len (2B) | authentikey_sig ]
+  ```
   * 当 $P2 = 0x02$ 时，`public_val` 为 32 字节 Montgomery $u$ 坐标，`pub_len` 为 `0x0020`。
   * 尾部包含由 Authentikey 签发的完整 DER 签名，用于主机端防伪校验。
 
@@ -189,10 +197,10 @@ Ed25519（Twisted Edwards 曲线）与 X25519（Montgomery 曲线）在双有理
 * **P1**: `0xFF`（强制使用暂存密钥，其它值报错）
 * **P2**: `0x00`（强制为 0x00）
 * **Data 格式 (Lc)**：
-  * **无 2FA**：$[msg\_bytes]$（长度 $1 \le L \le 149$ 字节）
-  * **开启 2FA**：$[msg\_bytes \parallel 0x8000 \parallel 20B\_HMAC\_Token]$（明文长度最长 127 字节）
+  * **无 2FA**：`[ msg_bytes ]`（长度 $1 \le L \le 149$ 字节）
+  * **开启 2FA**：`[ msg_bytes | 0x8000 | 20B_HMAC_Token ]`（明文长度最长 127 字节）
 * **应答数据格式**：
-  * 成功：$[sig(64B)]$（标准的 RFC 8032 $R \parallel S$ 格式）+ `0x9000`
+  * 成功：`[ sig (64B) ]`（标准的 RFC 8032 $R \parallel S$ 格式）+ `0x9000`
   * 若此前暂存过公钥，卡内会自动执行成对验签（Pairwise Verification），验签失败抛出 `SW_SIGNATURE_INVALID` (`0x9C0B`)。
 
 ---
@@ -204,11 +212,11 @@ Ed25519（Twisted Edwards 曲线）与 X25519（Montgomery 曲线）在双有理
 * **CLA**: `0xB0` | **INS**: `0x68`
 * **P1**: `0xFF` | **P2**: `0x00`
 * **Data 格式 (Lc)**：
-  * **无 2FA**：$[remote\_public\_u(32B)]$（固定 32 字节）
-  * **开启 2FA**：$[remote\_public\_u(32B) \parallel 0x8000 \parallel 20B\_HMAC\_Token]$（固定 54 字节）
+  * **无 2FA**：`[ remote_public_u (32B) ]`（固定 32 字节）
+  * **开启 2FA**：`[ remote_public_u (32B) | 0x8000 | 20B_HMAC_Token ]`（固定 54 字节）
 * **安全特性**：卡内自动规约 $u \ge p$ 的别名点，强制拒绝低阶点与全零共享秘密。
 * **应答数据格式**：
-  * 成功：$[shared\_secret(32B)]$ + `0x9000`
+  * 成功：`[ shared_secret (32B) ]` + `0x9000`
 
 ---
 

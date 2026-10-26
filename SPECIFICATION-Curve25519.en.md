@@ -109,8 +109,10 @@ The twisted Edwards curve Ed25519 and Montgomery curve X25519 are isomorphic und
 
 To protect against Man-in-the-Middle (MITM) attacks or rogue host proxies altering derived chain codes or public keys, `Satochip-25519-J3R452` leverages the card's native Authentikey signature mechanism:
 * The response payload for `0x6B` follows:
-  $$\text{Payload} = [\text{Chaincode}(32B) \parallel \text{PubkeyLen}(2B) \parallel \text{Pubkey}(0B/32B)]$$
-  $$\text{Response} = [\text{Payload} \parallel \text{SigLen}(2B) \parallel \text{Authentikey\_ECDSA\_Signature}]$$
+  ```text
+  Payload  = [ Chaincode (32B) | PubkeyLen (2B) | Pubkey (0B / 32B) ]
+  Response = [ Payload | SigLen (2B) | Authentikey ECDSA Signature ]
+  ```
 * **The host client MUST verify this ECDSA signature against the card's Authentikey (secp256k1 public key)**. If the signature is invalid or tampered with, the host must immediately abort the session.
 
 ---
@@ -121,11 +123,15 @@ When 2FA is enabled on the card (`needs_2FA = true`), all sensitive signing and 
 
 #### Full-Message Binding Algorithm
 * **Ed25519 Message Signatures**:
-  $$\text{Digest} = \text{SHA256}(\text{full\_message})$$
-  $$\text{Token} = \text{HMAC-SHA1}(K_{2FA}, \text{Digest} \parallel 0xCE^{32})$$
+  ```text
+  Digest = SHA256(full_message)
+  Token  = HMAC-SHA1(K_2FA, Digest || 0xCE^32)
+  ```
   *Regardless of whether the transaction payload is 1 byte or 128 bytes, the token strictly binds the complete SHA-256 digest. Modifying any byte immediately invalidates the token.*
 * **X25519 Key Agreement (Domain Separated)**:
-  $$\text{Token} = \text{HMAC-SHA1}(K_{2FA}, \text{remote\_u} \parallel 0xCF^{32})$$
+  ```text
+  Token = HMAC-SHA1(K_2FA, remote_u || 0xCF^32)
+  ```
   *Uses isolated padding byte `0xCF` to prevent token cross-replay between signing and agreement.*
 
 ---
@@ -172,11 +178,13 @@ Performs SLIP-0010 hardened key derivation and caches the generated child privat
   * **`0x01`**: Stage and verify against host-supplied 32-byte Ed25519 public key (enables pairwise check).
   * **`0x02`**: Derive and export 32-byte Montgomery $u$-coordinate for host public key recovery.
 * **Data Field (Lc)**:
-  * If $P2 \in \{0x00, 0x02\}$: $[path(4 \times depth)]$
-  * If $P2 == 0x01$: $[path(4 \times depth) \parallel pubkey(32B)]$
+  * If `P2 == 0x00` or `P2 == 0x02`: `[ path (4 * depth) ]`
+  * If `P2 == 0x01`: `[ path (4 * depth) | pubkey (32B) ]`
 * **Response Payload Format**:
-  $$\text{Response} = [\text{chaincode}(32B) \parallel \text{pub\_len}(2B) \parallel \text{public\_val}(0B/32B) \parallel \text{sig\_len}(2B) \parallel \text{authentikey\_sig}]$$
-  * When $P2 = 0x02$, `public_val` contains the 32-byte Montgomery $u$-coordinate and `pub_len` is `0x0020`.
+  ```text
+  Response = [ chaincode (32B) | pub_len (2B) | public_val (0B / 32B) | sig_len (2B) | authentikey_sig ]
+  ```
+  * When `P2 = 0x02`, `public_val` contains the 32-byte Montgomery $u$-coordinate and `pub_len` is `0x0020`.
   * The trailing Authentikey ECDSA signature certifies the payload to prevent host tampering.
 
 ---
@@ -189,10 +197,10 @@ Signs the provided message with the currently staged Ed25519 private key using t
 * **P1**: `0xFF` (Must specify `0xFF` to reference the staged key)
 * **P2**: `0x00`
 * **Data Field (Lc)**:
-  * **Standard (No 2FA)**: $[msg\_bytes]$ ($1 \le L \le 149$ bytes)
-  * **2FA Enabled**: $[msg\_bytes \parallel 0x8000 \parallel 20B\_HMAC\_Token]$ (Max message length: 127 bytes)
+  * **Standard (No 2FA)**: `[ msg_bytes ]` ($1 \le L \le 149$ bytes)
+  * **2FA Enabled**: `[ msg_bytes | 0x8000 | 20B_HMAC_Token ]` (Max message length: 127 bytes)
 * **Response Payload**:
-  * Success: $[sig(64B)]$ (Standard RFC 8032 $R \parallel S$ format) + `0x9000`
+  * Success: `[ sig (64B) ]` (Standard RFC 8032 $R \parallel S$ format) + `0x9000`
   * If a public key was staged, the card executes internal pairwise verification. A mismatch yields `SW_SIGNATURE_INVALID` (`0x9C0B`).
 
 ---
@@ -204,11 +212,11 @@ Computes RFC 7748 Diffie-Hellman shared secret between staged private key and re
 * **CLA**: `0xB0` | **INS**: `0x68`
 * **P1**: `0xFF` | **P2**: `0x00`
 * **Data Field (Lc)**:
-  * **Standard (No 2FA)**: $[remote\_public\_u(32B)]$ (Exact 32 bytes)
-  * **2FA Enabled**: $[remote\_public\_u(32B) \parallel 0x8000 \parallel 20B\_HMAC\_Token]$ (Exact 54 bytes)
+  * **Standard (No 2FA)**: `[ remote_public_u (32B) ]` (Exact 32 bytes)
+  * **2FA Enabled**: `[ remote_public_u (32B) | 0x8000 | 20B_HMAC_Token ]` (Exact 54 bytes)
 * **Security Defenses**: Automatically normalizes alias coordinates ($u \ge p$), strictly rejects low-order points and all-zero shared secrets.
 * **Response Payload**:
-  * Success: $[shared\_secret(32B)]$ + `0x9000`
+  * Success: `[ shared_secret (32B) ]` + `0x9000`
 
 ---
 
