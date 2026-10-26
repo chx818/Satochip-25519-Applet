@@ -23,18 +23,13 @@
 * **双曲线物理内存隔离**：`secp256k1` 与 `Curve25519` 两套密码学状态机在卡内 RAM 中物理隔离。两套体系统一共享卡片唯一的 BIP39 Master Seed、统一 PIN 鉴权状态、统一失败重试计数器与 SecureChannel 加密会话。
 * **原生硬件加速**：Ed25519 签名直接调度 NXP 加密硬件协处理器执行，典型耗时仅约 **220 ms**。
 * **SLIP-0010 多链硬派生**：支持 Solana (501')、TON (607')、Sui (784')、Aptos (637')、Polkadot (354') 与 Near (397') 等公链。
-* **Authentikey 签名公钥导出**：派生指令（`0x6B`）导出的 Montgomery 坐标附带由卡片内部 Authentikey 签发的 ECDSA 签名，上位机双有理反解出 Edwards 公钥的同时彻底杜绝中间人（MITM）篡改。
-* **强绑定 2FA 交易验证 (WYSIWYS)**：全报文 SHA-256 摘要与 HMAC-SHA1 印章强绑定，根除消息尾部截断漏洞。
+* **Authentikey 签名公钥导出**：派生指令（`0x6B`）导出的 Montgomery 坐标附带由卡片内部 Authentikey 签发的 ECDSA 签名，上位机在核验卡片真实性的同时完成 Edwards 公钥的双有理坐标反解。
+* **强绑定 2FA 交易验证 (WYSIWYS)**：全报文 SHA-256 摘要与 HMAC-SHA1 强绑定，确保大报文分包传输的完整性。
 
 ---
 
-## 安全边界与威胁模型说明
-
-作为高标准的开源项目，我们向社区实事求是地公开本工程的安全界限：
-
-1. **芯片硬件 CC EAL6+ 认证界限**：CC EAL6+ 认证属于 NXP J3R452 底层晶圆与 JCOP 4.5 操作系统的物理安全认证，**不代表本开源 Applet 应用程序、第三方 Curve25519 库或上位机桥接器整体获得了 EAL6+ 软件认证**。
-2. **软件 HMAC-SHA512 物理侧信道说明**：根据芯片实测（`algtest`），J3R452 当前固件未开放硬件 `ALG_HMAC_SHA_512` 运行时引擎。SLIP-0010 密钥派生采用软件 RFC 2104 异或循环结合硬件 SHA-512 协处理器执行。在芯片落入攻击者手中且被施加实验室级示波器探针进行差分功耗（DPA）分析的极端物理威胁模型下，理论上存在暴露面；但对网络黑客攻击、木马窃密和丢卡暴力破解具备绝对免疫。
-3. **Fail-Closed 故障防护**：任何非法路径、非硬派生索引、畸形 APDU 或 2FA 校验失败，均强制彻底清空 RAM 暂存密钥并终止执行。
+> [!NOTE]
+> **项目说明**：本项目属于实验性社区开源项目。与原版 SatochipApplet 相同，密钥派生（BIP32 / SLIP-0010）均采用软件 HMAC-SHA512 结合卡内硬件 SHA-512 协处理器执行，而 Curve25519（Ed25519 / X25519）的密码学运算则由 NXP 原生底层加密协处理器提供全硬件加速。
 
 ---
 
@@ -42,9 +37,9 @@
 
 发行二进制产物经过两次独立环境快照双编译，并通过 Oracle 官方离卡验证器（Off-Card Verifier）逐字节校验：
 
-| 发行产物 | 文件路径 | SHA-256 校验和 |
+| Artifact | File Path | SHA-256 Hash |
 | :--- | :--- | :--- |
-| **JavaCard CAP** | [`dist/SatoChip-J3R452-Curve25519.cap`](dist/SatoChip-J3R452-Curve25519.cap) | `94b9c1c3b124167e5e4b7c3944ba1f30db5b5fb29444347ba4751038c05e8a2c` |
+| **JavaCard CAP** | [`dist/SatoChip-J3R452-Curve25519.cap`](dist/SatoChip-J3R452-Curve25519.cap) | `9fb7394addd25dbf02d91f805aee04d106a9daa00d3e8df5dca4b6250a8b1dc4` |
 | **哈希清单** | [`dist/SHA256SUMS`](dist/SHA256SUMS) | 产物完整哈希签名 |
 | **构建审计** | [`dist/build-manifest.json`](dist/build-manifest.json) | 编译环境、依赖组件与重现记录清单 |
 
@@ -95,7 +90,7 @@ install.bat
 ./gradlew convertJavacard
 ```
 
-编译产物 CAP 将自动与官方校验和 `94b9c1c3b124167e5e4b7c3944ba1f30db5b5fb29444347ba4751038c05e8a2c` 比对，保证逐字节一致。
+编译产物 CAP 将自动与官方校验和 `9fb7394addd25dbf02d91f805aee04d106a9daa00d3e8df5dca4b6250a8b1dc4` 比对，保证逐字节一致。
 
 ---
 

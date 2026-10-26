@@ -2720,6 +2720,10 @@ public class Satochip extends javacard.framework.Applet {
         short secretLength = 0;
         byte allZero = (byte)0;
         try {
+            // The vendor wrapper may open/close a JavaCard transaction internally. Do not let
+            // it abort a transaction owned by the surrounding applet command or caller.
+            if (JCSystem.getTransactionDepth() != 0)
+                TransactionException.throwIt(TransactionException.IN_PROGRESS);
             edKey.getS(recvBuffer, (short)0);
             HmacSha512.computeSha512(recvBuffer, (short)0, (short)32, recvBuffer, (short)64);
             recvBuffer[64] &= (byte)0xF8;

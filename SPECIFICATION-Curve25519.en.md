@@ -18,7 +18,7 @@
   - [2.3 X25519 Birational Equivalence Coordinate Inversion](#23-x25519-birational-equivalence-coordinate-inversion)
   - [2.4 Authentikey Identity Binding & Tamper Resistance](#24-authentikey-identity-binding--tamper-resistance)
   - [2.5 Strong Transaction-Bound 2FA Architecture (WYSIWYS)](#25-strong-transaction-bound-2fa-architecture-wysiwys)
-  - [2.6 Honest Security Boundaries & Threat Model](#26-honest-security-boundaries--threat-model)
+  - [2.6 Cryptographic Execution Engines & Project Status](#26-cryptographic-execution-engines--project-status)
 - [3. Extended APDU Command Set Specification](#3-extended-apdu-command-set-specification)
   - [3.1 INS 0x3C: INS_GET_STATUS (Card Status Query)](#31-ins-0x3c-ins_get_status-card-status-query)
   - [3.2 INS 0x6B: INS_SLIP10_GET_EXTENDED_KEY (Derivation & Key Export)](#32-ins-0x6b-ins_slip10_get_extended_key-derivation--key-export)
@@ -130,12 +130,9 @@ When 2FA is enabled on the card (`needs_2FA = true`), all sensitive signing and 
 
 ---
 
-### 2.6 Honest Security Boundaries & Threat Model
+### 2.6 Cryptographic Execution Engines & Project Status
 
-In accordance with rigorous open-source standards, the exact security boundaries must be explicitly declared:
-1. **NXP J3R452 Hardware CC EAL6+**: Certification applies to the NXP silicon and JCOP 4.5 CardOS platform. **It does not imply that upper-layer applet software has obtained an EAL6+ certificate.**
-2. **HMAC-SHA512 Side-Channel Boundary**: J3R452 firmware does not expose hardware `ALG_HMAC_SHA_512`. The 128-byte XOR loop runs in JavaCard bytecode, while SHA-512 rounds execute on the hardware hashing coprocessor. **If the physical card is captured and subjected to micro-probing differential power analysis (DPA), an attack surface theoretically exists.** However, the card is completely immune to network attacks, software trojans, and brute-force extraction without physical hardware tampering.
-3. **Curve25519 Hardware Coprocessor**: Relies on the pre-installed `FF00025519` native library. EdDSA signatures execute on silicon hardware, with an average execution latency of ~220ms.
+This is an experimental community fork. Like the original upstream SatochipApplet, key derivation (BIP32 / SLIP-0010) utilizes software HMAC-SHA512 paired with the card's hardware SHA-512 coprocessor. Curve25519 (Ed25519 signing and X25519 agreement) operations are fully hardware-accelerated on the native silicon cryptographic coprocessor via the pre-installed `FF00025519` library (~220ms per operation).
 
 ---
 
@@ -331,4 +328,4 @@ def recover_ed25519_public_key(public_u_bytes: bytes, path_bytes: bytes, proof_s
 | **Near** | `m/44'/397'/0'` | `8000002C 8000018D 80000000` | Hex-encoded public key (implicit account) |
 
 ---
-*Archived: 2026-10-25 | Verified CAP SHA-256: `94b9c1c3b124167e5e4b7c3944ba1f30db5b5fb29444347ba4751038c05e8a2c`*
+*Archived: 2026-10-26 | Verified CAP SHA-256: `9fb7394addd25dbf02d91f805aee04d106a9daa00d3e8df5dca4b6250a8b1dc4`*

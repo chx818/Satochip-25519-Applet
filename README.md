@@ -23,18 +23,13 @@
 * **Dual-Curve Physical Memory Isolation**: The `secp256k1` and `Curve25519` cryptographic subsystems maintain physically isolated states in RAM. Both curves share the unified on-card BIP39 Master Seed, unified PIN authentication, unified retry counters, and unified SecureChannel session.
 * **Native Silicon Hardware Acceleration**: Ed25519 signatures execute on the NXP hardware coprocessor with a typical latency of ~220ms.
 * **SLIP-0010 Multi-Chain Key Derivation**: Hardened key derivation supporting Solana (501'), TON (607'), Sui (784'), Aptos (637'), Polkadot (354'), and Near (397').
-* **Authentikey Certified Public Key Export**: Derivation responses (`0x6B`) return the Montgomery $u$-coordinate bound with a card-internal Authentikey ECDSA signature, enabling host clients to birationally recover true Edwards public keys while preventing Man-in-the-Middle (MITM) tampering.
-* **Strong 2FA Transaction Binding (WYSIWYS)**: Full-message SHA-256 digest binding via HMAC-SHA1 challenge-response eliminates partial-payload truncation attacks.
+* **Authentikey Certified Public Key Export**: Derivation responses (`0x6B`) return the Montgomery $u$-coordinate certified with a card-internal Authentikey ECDSA signature, allowing host clients to verify card authenticity and birationally recover true Edwards public keys.
+* **Strong 2FA Transaction Binding (WYSIWYS)**: Full-message SHA-256 digest binding via HMAC-SHA1 challenge-response ensures end-to-end multi-packet message integrity.
 
 ---
 
-## Security Disclosures & Threat Model
-
-In accordance with rigorous open-source standards, we transparently disclose the system's exact security boundaries:
-
-1. **Hardware CC EAL6+ Boundary**: The CC EAL6+ certification applies strictly to the underlying NXP J3R452 silicon chip and JCOP 4.5 CardOS. It does **not** imply that this open-source applet, the third-party Curve25519 package, or host bridge daemons have received formal EAL6+ software certification.
-2. **Software HMAC-SHA512 Side-Channel Notice**: Silicon verification via `algtest` confirms that the J3R452 platform does not expose a usable hardware `ALG_HMAC_SHA_512` engine. Key derivation relies on an RFC 2104 software XOR loop combined with the silicon SHA-512 coprocessor. In scenarios where an attacker captures the physical chip and applies laboratory micro-probing differential power analysis (DPA), an attack surface theoretically exists. However, the card provides absolute protection against network exploits, software malware, and offline brute-force attacks.
-3. **Fail-Closed Policy**: Invalid paths, non-hardened indexes, malformed APDUs, and 2FA failures immediately clear transient RAM keys and abort execution.
+> [!NOTE]
+> **Project Status**: This is an experimental, community-maintained hardware wallet project. Like the original upstream SatochipApplet, key derivation (BIP32 / SLIP-0010) uses software HMAC-SHA512 combined with on-card hardware SHA-512 acceleration, while Curve25519 (Ed25519 / X25519) operations are fully hardware-accelerated by the native cryptographic coprocessor.
 
 ---
 
@@ -44,7 +39,7 @@ The release binary is verified through deterministic dual builds and Oracle Off-
 
 | Artifact | File Path | SHA-256 Hash |
 | :--- | :--- | :--- |
-| **JavaCard CAP** | [`dist/SatoChip-J3R452-Curve25519.cap`](dist/SatoChip-J3R452-Curve25519.cap) | `94b9c1c3b124167e5e4b7c3944ba1f30db5b5fb29444347ba4751038c05e8a2c` |
+| **JavaCard CAP** | [`dist/SatoChip-J3R452-Curve25519.cap`](dist/SatoChip-J3R452-Curve25519.cap) | `9fb7394addd25dbf02d91f805aee04d106a9daa00d3e8df5dca4b6250a8b1dc4` |
 | **SHA256 Manifest** | [`dist/SHA256SUMS`](dist/SHA256SUMS) | Cryptographic signature of binary output |
 | **Build Audit** | [`dist/build-manifest.json`](dist/build-manifest.json) | Environment, toolchain, and reproducibility records |
 
@@ -97,7 +92,7 @@ The installer automatically inspects the card's GlobalPlatform registry. If the 
 ./gradlew convertJavacard
 ```
 
-The resulting CAP binary will be validated for byte-for-byte reproducibility against the verified hash: `94b9c1c3b124167e5e4b7c3944ba1f30db5b5fb29444347ba4751038c05e8a2c`.
+The resulting CAP binary will be validated for byte-for-byte reproducibility against the verified hash: `9fb7394addd25dbf02d91f805aee04d106a9daa00d3e8df5dca4b6250a8b1dc4`.
 
 ---
 
