@@ -13,6 +13,13 @@
 
 ---
 
+> [!TIP]
+> **Support this Project / Purchase Pre-Flushed Hardware Cards**:  
+> If you are based in China or have access to payment methods supported on Chinese e-commerce platforms, consider purchasing our affordable, ready-to-use, all-in-one smart card to support development! Built on **NXP J3R452**, it integrates **FIDO2 + PIV + OpenPGP + OTP + Satochip + Seedkeeper**, priced at only **¥119 (~$18 USD)**.  
+> 🛒 **Order Link**: [Taobao (item.taobao.com)](https://item.taobao.com/item.htm?ft=t&id=1087207954892)
+
+---
+
 ## Overview
 
 **`Satochip-25519-Applet`** is an open-source JavaCard applet hard fork of [Toporin/SatochipApplet](https://github.com/Toporin/SatochipApplet). It integrates the [`suut/Curve25519-JavaCard`](https://github.com/suut/Curve25519-JavaCard) native cryptographic package (AID `FF00025519`) to unlock native silicon hardware-accelerated **Ed25519 signatures**, **X25519 Diffie-Hellman key agreement**, and **SLIP-0010 multi-chain child key derivation** directly on **NXP J3R452 (P71D600)** secure smart cards.

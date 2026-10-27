@@ -13,6 +13,13 @@
 
 ---
 
+> [!TIP]
+> **支持开源开发 / 购买预装全功能成品硬件卡**：  
+> 如果您来自中国或者拥有中国电商网站可用的支付方式，可以考虑直接购买我的物美价廉的全功能成品卡片来支持我。基于 **NXP J3R452** 构建，集成 **FIDO2 + PIV + OpenPGP + OTP + Satochip + Seedkeeper**，售价仅需 **119 元（约 18 美元）**。  
+> 🛒 **购买链接**：[淘宝商品直达 (item.taobao.com)](https://item.taobao.com/item.htm?ft=t&id=1087207954892)
+
+---
+
 ## 项目概述
 
 **`Satochip-25519-Applet`** 是基于官方开源 [Toporin/SatochipApplet](https://github.com/Toporin/SatochipApplet) 深度重构的 JavaCard 智能卡固件分支。项目结合 [`suut/Curve25519-JavaCard`](https://github.com/suut/Curve25519-JavaCard) 硬件扩展库（AID `FF00025519`），专门为 **NXP J3R452 (P71D600)** 芯片注入原生硅芯片硬件加速的 **Ed25519 数字签名**、**X25519 密钥协商**以及 **SLIP-0010 多链子私钥派生**能力。
